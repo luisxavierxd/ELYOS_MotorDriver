@@ -1,8 +1,8 @@
 #include "Telemetry_Manager.h"
 
-void TelemetryManager::begin(HardwareSerial &port)
+void TelemetryManager::begin(elyos::Uart *port)
 {
-    serial = &port;
+    serial = port;
 
     allFast = nullptr;
     // status  = nullptr;
@@ -28,7 +28,7 @@ uint8_t TelemetryManager::crc8_atm(const uint8_t *data, uint8_t len)
         for (uint8_t b = 0; b < 8; b++)
         {
             if (crc & 0x80)
-                crc = (crc << 1) ^ 0x07;
+                crc = static_cast<uint8_t>((crc << 1) ^ 0x07);
             else
                 crc <<= 1;
         }
@@ -39,9 +39,9 @@ uint8_t TelemetryManager::crc8_atm(const uint8_t *data, uint8_t len)
 
 void TelemetryManager::process()
 {
-    while (serial->available())
+    while (serial && serial->available())
     {
-        uint8_t b = serial->read();
+        uint8_t b = static_cast<uint8_t>(serial->readByte());
 
         switch (state)
         {
@@ -111,7 +111,8 @@ void TelemetryManager::sendReply(uint8_t cmd,
 
     frame[3 + payload_len] = crc;
 
-    serial->write(frame, 4 + payload_len);
+    if (serial)
+        serial->write(frame, 4 + payload_len);
 }
 
 

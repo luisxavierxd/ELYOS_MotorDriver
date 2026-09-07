@@ -1,7 +1,6 @@
 #pragma once 
 
-#include <Arduino.h>
-#include <SD.h>
+#include <cstdint>
 
 // Flush to SD every N samples 
 constexpr uint8_t kSamplesToFlushSD{200};
@@ -18,20 +17,21 @@ typedef struct {
 
 
 class BLDC_Logger {
-
 private:
-    const char* logger_file_name = "testing1.csv";
-    File SD_log_file;
-    bool SD_detected = false;
-    uint8_t sampleID = 0;
+    const char* logger_file_name_ = "testing1.csv";
+    void* file_handle_ = nullptr;
+    bool sd_detected_ = false;
+    uint8_t sample_id_ = 0;
 
 public:
-    BLDC_Logger_Data data;
+    BLDC_Logger_Data data{};
 
-    BLDC_Logger() = default;
+    BLDC_Logger();
     ~BLDC_Logger();
 
     void init();
 
+    bool isReady() const { return sd_detected_; }
     void logMotorDataSD();
+    void logMotorDataSD(const BLDC_Logger_Data &record);
 };

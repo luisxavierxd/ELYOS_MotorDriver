@@ -1,5 +1,7 @@
 #pragma once
-#include <Arduino.h>
+#include <cstdint>
+#include <cstring>
+#include "elyos_hal.h"
 
 /* ---------- protocol constants ---------- */
 
@@ -26,15 +28,12 @@ typedef enum
 class TelemetryManager
 {
 public:
-    void begin(HardwareSerial &port);
+    void begin(elyos::Uart *port);
 
-    /* call this from loop() */
+    /* call this from telemetry task */
     void process();
 
     /* ----- data providers (you bind your real variables) ----- */
-
-    // Bldc::foc_all_fast_t* allFast;
-    // Bldc::foc_status_t*   status;
     
     typedef struct __attribute__((packed))
     {
@@ -58,7 +57,7 @@ public:
     bool (*setIdPiGains)(int32_t kp, int32_t ki);
 
 private:
-    HardwareSerial *serial;
+    elyos::Uart *serial = nullptr;
 
     enum RxState
     {

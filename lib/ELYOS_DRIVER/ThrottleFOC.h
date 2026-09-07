@@ -1,8 +1,10 @@
 #pragma once
-#include <Arduino.h>
-#include <math.h>
+#include <cstdint>
+#include <cmath>
+#include <algorithm>
 #include "FOC_Parameters.h"
 #include "Pinout.h"
+#include "elyos_hal.h"
 
 class ThrottleFOC {
 public:
@@ -49,9 +51,9 @@ public:
   uint16_t getRaw() const { return cfg_.rawAdc_; }
 
   void begin() {
-    analogReadResolution(THROTTLE_RESOLUTION_BITS);  // Teensy 4.1 supports up to 12-bit ADC read setting
-    pinMode(cfg_.pedalPin, INPUT);
-    lastMicros_ = micros();
+    elyos::Adc::setResolution(THROTTLE_RESOLUTION_BITS);
+    elyos::Gpio::setMode(cfg_.pedalPin, elyos::GpioMode::Input);
+    lastMicros_ = elyos::Time::micros();
     pedalFilt_ = 0.0f;
     iqRef_ = 0.0f;
     fault_ = false;
@@ -59,7 +61,7 @@ public:
 
   // motorSpeedRadPerSec: use motor.shaftVelocity() or your own filtered vehicle/motor speed
   float update(float motorSpeedRadPerSec) {
-    const uint32_t now = micros();
+    const uint32_t now = elyos::Time::micros();
     float dt = (now - lastMicros_) * 1e-6f;
     lastMicros_ = now;
 
@@ -68,8 +70,8 @@ public:
       dt = 0.001f; // default 1 ms
     }
 
-    // 1) Read pedal ADC
-    uint16_t adc = analogRead(cfg_.pedalPin);
+    // 1) Read pedal ADC via HAL
+    uint16_t adc = elyos::Adc::read(cfg_.pedalPin, THROTTLE_RESOLUTION_BITS);
     cfg_.rawAdc_ = adc;
 
     // 2) Range/fault check
@@ -119,7 +121,7 @@ public:
     pedalFilt_ = 0.0f;
     iqRef_ = 0.0f;
     fault_ = false;
-    lastMicros_ = micros();
+    lastMicros_ = elyos::Time::micros();
   }
 
   bool faulted() const { return fault_; }
@@ -173,7 +175,7 @@ private:
   float computeEffectiveIqLimit(float absSpeed) const {
     // launch cap at very low speed for smooth starts and lower peaks
     if (absSpeed <= cfg_.launchSpeedRadPerSec) {
-      return min(cfg_.iqLaunchMax, cfg_.iqMax);
+      return std::min(cfg_.iqLaunchMax, cfg_.iqMax);
     }
 
     // blend from launch limit to full iqMax as speed rises

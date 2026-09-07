@@ -73,9 +73,9 @@ int ELYOS_DRIVER::driver_Init(){
     // Commander, telemetry and Serial initialization
     Serial.begin(115200);
     SimpleFOCDebug::enable(&Serial);
-    Serial1.begin(115200);  // must match ESP side
+    elyos::getTelemetryUart()->begin(115200);  // must match ESP companion side
 
-    telemetry.begin(Serial1);
+    telemetry.begin(elyos::getTelemetryUart());
     telemetry.vbus_mV = &telemetry_vbus_mV;
     telemetry.ibus_mA = &telemetry_ibus_mA;
     telemetry.rpm = &telemetry_rpm;
@@ -90,8 +90,8 @@ int ELYOS_DRIVER::driver_Init(){
     commander.add('t', onTargetWrapper, "Target");
 
     // Throttle 
-    pinMode(THROTTLE_PIN, INPUT);
-    analogReadResolution(12);
+    elyos::Gpio::setMode(THROTTLE_PIN, elyos::GpioMode::Input);
+    elyos::Adc::setResolution(12);
 
     // Hall sensor 
     hall_sensor->init();
@@ -183,7 +183,7 @@ int ELYOS_DRIVER::control_Init(){
 
 // This is not used yet 
 void ELYOS_DRIVER::calculateTelemetry(){
-    uint16_t raw_vbus = analogRead(VBUS_SENSE_PIN);
+    uint16_t raw_vbus = elyos::Adc::read(VBUS_SENSE_PIN, 12);
     float vbus = (raw_vbus / 4095.0f) * 60.9f;
 
     telemetry_vbus_mV = (uint16_t)(vbus * 1000.0f);
@@ -215,29 +215,56 @@ void ELYOS_DRIVER::calculateTelemetry(){
 }
 
 
-void ELYOS_DRIVER::runFOC(){
+void ELYOS_DRIVER::stepFOC(float iq_cmd) {
     motor.loopFOC();
+    motor.move(iq_cmd);
+}
 
+float ELYOS_DRIVER::updateThrottle() {
     float speed_rad_s = motor.shaftVelocity();
-    // compute shaped/smoothed efficient iq command
-    float iq_cmd = throttle.update(speed_rad_s);
+    return throttle.update(speed_rad_s);
+}
+
+void ELYOS_DRIVER::processTelemetry() {
+    calculateTelemetry();
+    telemetry.process();
+}
+
+void ELYOS_DRIVER::processCommander() {
+    motor.monitor();
+    commander.run();
+}
+
+void ELYOS_DRIVER::populateLoggerData(BLDC_Logger_Data &log_data) {
+    log_data.timestamp = millis();
+    log_data.raw_throttle = throttle.getRaw();
+    log_data.VBat = telemetry_vbus_mV;
+    PhaseCurrent_s currents = current_sense.getPhaseCurrents();
+    log_data.currentA = currents.a;
+    log_data.currentB = currents.b;
+    log_data.currentC = currents.c;
+    log_data.rpm = (telemetry_rpm >= 0) ? static_cast<uint16_t>(telemetry_rpm) : static_cast<uint16_t>(-telemetry_rpm);
+}
+
+float ELYOS_DRIVER::getShaftVelocity() {
+    return motor.shaftVelocity();
+}
+
+void ELYOS_DRIVER::runFOC(){
+    float iq_cmd = updateThrottle();
+    stepFOC(iq_cmd);
 
     // Calculate telemetry values
     static uint32_t lastTelemetryTime = 0;
     uint32_t now = millis();
     if (now - lastTelemetryTime >= 100) { // Send telemetry every 100 ms
-        calculateTelemetry();
+        processTelemetry();
         lastTelemetryTime = now;   
-        // Serial.println(iq_cmd); 
     }
 
-    // Move
-    motor.move(iq_cmd);
-    // motor.move();
-    motor.monitor();
-    telemetry.process();
-    commander.run();
+    processCommander();
 }
+
 
 
 //////////////////////////////////////////////////////

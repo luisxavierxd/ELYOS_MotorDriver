@@ -2,7 +2,7 @@
 #include "Pinout.h"
 #include "FOC_Parameters.h"
 #include <SimpleFOC.h>
-#include "smoothing/SmoothingSensor.h"
+#include "SmoothingSensor.h"
 #include "ThrottleFOC.h"
 
 // Telemetry and logging
@@ -14,7 +14,7 @@
 
 typedef struct {
     int code;
-    String message;
+    const char *message;
 } ELYOS_DRIVER_STATUS;
 
 class ELYOS_DRIVER {
@@ -44,21 +44,35 @@ class ELYOS_DRIVER {
         // Low pass filter for throttle
         // LowPassFilter throttle_lpf = LowPassFilter(0.02f);
 
+        // Sensors (must match constructor initializer order)
+    public:
+        HallSensor *hall_sensor = nullptr;
+        SmoothingSensor *smooth_sensor = nullptr;
+
+    protected:
         // Throttle FOC approach
         ThrottleFOC throttle;
 
     public:
-        // For ISR
-        HallSensor *hall_sensor;
-        SmoothingSensor *smooth_sensor;
-
         ELYOS_DRIVER();
         int driver_Init();
         int control_Init();
         void ThrottleFOC_Init();
         void runFOC();
 
-        // Telemetry 
+        // Modular execution steps for FreeRTOS / RTOS tasks
+        void stepFOC(float iq_cmd);
+        float updateThrottle();
+        void processTelemetry();
+        void processCommander();
+        void populateLoggerData(BLDC_Logger_Data &log_data);
+
+        // State accessors
+        float getShaftVelocity();
+        float getMotorTarget() const { return motor.target; }
+        ThrottleFOC& getThrottle() { return throttle; }
+
+        // Telemetry calculation
         void calculateTelemetry();
 
         // Callbacks
