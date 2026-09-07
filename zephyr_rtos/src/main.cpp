@@ -1,8 +1,14 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
 
 LOG_MODULE_REGISTER(elyos_driver, LOG_LEVEL_INF);
+
+// Dispositivos PWM globales para el handler de interrupción
+const struct device *pwm_dev_a = NULL;
+const struct device *pwm_dev_b = NULL;
+const struct device *pwm_dev_c = NULL;
 
 // ============================================================================
 // DEFINICIÓN DE PINES (Próximamente definidos en app.overlay)
@@ -70,8 +76,26 @@ void foc_timer_handler(struct k_timer *timer_id)
     // 6. SVPWM (Alpha/Beta voltajes -> Ciclos de trabajo)
     elyos_foc::PhaseVoltages duties = elyos_foc::svpwm(v_ab_target, g_vbus);
 
-    // 7. Aquí iría la escritura de PWM a los registros del i.MX RT1062
-    // pwm_set_cycles(pwm_dev, channel, period, duties.a * period, 0);
+    // 7. Escritura de PWM a los registros usando la API de Zephyr
+    // 10 kHz = 100,000 ns de periodo
+    const uint32_t period_ns = 100000;
+    
+    // Asumiendo que tenemos los devices pwm_a, pwm_b, pwm_c inicializados en main()
+    extern const struct device *pwm_dev_a;
+    extern const struct device *pwm_dev_b;
+    extern const struct device *pwm_dev_c;
+
+    if (pwm_dev_a && pwm_dev_b && pwm_dev_c) {
+        uint32_t pulse_a = duties.a * period_ns;
+        uint32_t pulse_b = duties.b * period_ns;
+        uint32_t pulse_c = duties.c * period_ns;
+
+        // Canal 0 suele ser A, Canal 1 es B (complementario). 
+        // Zephyr maneja ambos si el driver soporta pares complementarios.
+        pwm_set_cycles(pwm_dev_a, 0, period_ns, pulse_a, 0);
+        pwm_set_cycles(pwm_dev_b, 0, period_ns, pulse_b, 0);
+        pwm_set_cycles(pwm_dev_c, 0, period_ns, pulse_c, 0);
+    }
 }
 K_TIMER_DEFINE(foc_timer, foc_timer_handler, NULL);
 
@@ -155,6 +179,18 @@ K_THREAD_DEFINE(logger_tid, LOGGER_STACK_SIZE,
 int main(void)
 {
     LOG_INF("Arrancando ELYOS Motor Driver (Zephyr RTOS Port)");
+
+    // Inicializar PWM desde el DeviceTree
+    pwm_dev_a = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm0));
+    pwm_dev_b = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm2));
+    pwm_dev_c = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm3));
+
+    if (!device_is_ready(pwm_dev_a) || !device_is_ready(pwm_dev_b) || !device_is_ready(pwm_dev_c)) {
+        LOG_ERR("Error: Dispositivos PWM no están listos. Revisa el DeviceTree.");
+        return 0;
+    }
+    
+    LOG_INF("PWM inicializado correctamente.");
 
     if (led.port != NULL) {
         if (!gpio_is_ready_dt(&led)) {
