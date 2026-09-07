@@ -24,14 +24,54 @@ struct sd_log_data {
 K_MSGQ_DEFINE(sd_log_queue, sizeof(struct sd_log_data), 32, 4);
 
 // ============================================================================
+// VARIABLES FOC
+// ============================================================================
+#include "foc_math.h"
+
+// Voltaje de bus (batería) y ángulo eléctrico (simulado o del encoder)
+static volatile float g_vbus = 24.0f;
+static volatile float g_elec_angle = 0.0f; 
+
+// Controladores PI (Proporcional-Integral)
+// Ajuste de ganancias (placeholder)
+static elyos_foc::PIController pi_d(0.5f, 0.01f, 24.0f);
+static elyos_foc::PIController pi_q(0.5f, 0.01f, 24.0f);
+
+// ============================================================================
 // HILO DEL LAZO FOC (Reemplazo del IntervalTimer a 10kHz)
 // ============================================================================
-// En Zephyr, podemos usar un timer o un hilo de muy alta prioridad cooperativo.
-// Para FOC (10 kHz = 100 us), los hardware timers de Zephyr (k_timer) son la mejor opción.
 void foc_timer_handler(struct k_timer *timer_id)
 {
-    // Aquí iría: driver.stepFOC(g_iq_target);
-    // Actualmente solo es un placeholder de interrupción a 10kHz
+    // 1. Lectura de corrientes de fase (simulación ADC)
+    elyos_foc::PhaseCurrents i_abc = {0.0f, 0.0f, 0.0f};
+
+    // 2. Transformada de Clarke (3 fases -> Alpha/Beta)
+    elyos_foc::AlphaBeta i_ab = elyos_foc::clarke(i_abc);
+
+    // 3. Transformada de Park (Alpha/Beta -> D/Q)
+    elyos_foc::DQCurrents i_dq = elyos_foc::park(i_ab, g_elec_angle);
+
+    // 4. Controladores PI de Corriente
+    // dt = 100us (0.0001 s)
+    float dt = 0.0001f;
+    
+    // Id objetivo siempre es 0 para un BLDC de imanes superficiales
+    float error_d = 0.0f - i_dq.d;
+    float v_d = pi_d(error_d, dt);
+
+    // Iq objetivo viene del acelerador (g_iq_target)
+    float error_q = g_iq_target - i_dq.q;
+    float v_q = pi_q(error_q, dt);
+
+    // 5. Transformada Inversa de Park (D/Q voltajes -> Alpha/Beta voltajes)
+    elyos_foc::DQVoltages v_dq_target = {v_d, v_q};
+    elyos_foc::AlphaBeta v_ab_target = elyos_foc::inv_park(v_dq_target, g_elec_angle);
+
+    // 6. SVPWM (Alpha/Beta voltajes -> Ciclos de trabajo)
+    elyos_foc::PhaseVoltages duties = elyos_foc::svpwm(v_ab_target, g_vbus);
+
+    // 7. Aquí iría la escritura de PWM a los registros del i.MX RT1062
+    // pwm_set_cycles(pwm_dev, channel, period, duties.a * period, 0);
 }
 K_TIMER_DEFINE(foc_timer, foc_timer_handler, NULL);
 
