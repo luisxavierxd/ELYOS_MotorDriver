@@ -1,3 +1,7 @@
+// Workaround para bug de CMSIS con C++ en GCC (evita que falle la compilación, no usamos estas SIMD)
+#define __sxtb16(x) (x)
+#define __sxtab16(x, y) (x)
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/gpio.h>
@@ -24,8 +28,7 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios
 static const struct spi_config spi_cfg = {
     .frequency = 10000000,
     .operation = SPI_WORD_SET(16) | SPI_TRANSFER_MSB | SPI_MODE_CPHA,
-    .slave = 0,
-    .cs = NULL,
+    .slave = 0
 };
 
 // ============================================================================
@@ -207,19 +210,19 @@ K_THREAD_DEFINE(logger_tid, LOGGER_STACK_SIZE, task_logger_entry, NULL, NULL, NU
 // MAIN / SETUP
 // ============================================================================
 int main(void) {
-    LOG_INF("Arrancando ELYOS Motor Driver (Zephyr RTOS Port) - 100% Capacidades");
+    LOG_INF("Arrancando ELYOS Motor Driver (Zephyr RTOS Port) - 100%% Capacidades");
 
     if (led.port != NULL) {
         gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
     }
 
     // Inicializar dispositivos
-    pwm_dev_a = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm0));
-    pwm_dev_b = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm2));
-    pwm_dev_c = DEVICE_DT_GET(DT_NODELABEL(flexpwm2_pwm3));
-    spi_dev = DEVICE_DT_GET(DT_NODELABEL(lpspi1));
-    adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
-    uart_dev = DEVICE_DT_GET(DT_NODELABEL(lpuart2));
+    pwm_dev_a = DEVICE_DT_GET(DT_ALIAS(pwm_phase_a));
+    pwm_dev_b = DEVICE_DT_GET(DT_ALIAS(pwm_phase_b));
+    pwm_dev_c = DEVICE_DT_GET(DT_ALIAS(pwm_phase_c));
+    spi_dev = DEVICE_DT_GET(DT_ALIAS(spi_mag));
+    adc_dev = DEVICE_DT_GET(DT_ALIAS(adc_motor));
+    uart_dev = DEVICE_DT_GET(DT_ALIAS(uart_telem));
 
     if (!device_is_ready(pwm_dev_a)) LOG_ERR("PWM A no listo");
     if (!device_is_ready(spi_dev)) LOG_ERR("SPI no listo");

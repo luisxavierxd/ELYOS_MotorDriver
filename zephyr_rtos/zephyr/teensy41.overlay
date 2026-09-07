@@ -1,37 +1,25 @@
 /*
- * Device Tree Overlay para Teensy 4.1 - Proyecto ELYOS Motor Driver
+ * Device Tree Overlay para Teensy 4.1
  */
 
 / {
     aliases {
-        led0 = &led0;
-        
         // PWM aliases para FOC
         pwm-phase-a = &flexpwm2_pwm0;
         pwm-phase-b = &flexpwm2_pwm2;
         pwm-phase-c = &flexpwm2_pwm3;
         
-        // ADC
-        adc-current = &adc1;
-        adc-throttle = &adc1;
-        
-        // UART Telemetria
-        uart-telem = &lpuart2;
-    };
-
-    leds {
-        compatible = "gpio-leds";
-        led0: led_0 {
-            gpios = <&gpio9 3 GPIO_ACTIVE_HIGH>;
-            label = "User LED";
-        };
+        // Dispositivos FOC
+        adc-motor = &adc1;
+        uart-telem = &lpuart6;
+        spi-mag = &lpspi3;
     };
 };
 
-&lpspi1 {
+&lpspi3 {
     status = "okay";
     
-    // Configuración del sensor magnético SPI
+    // Sensor magnético SPI
     mag_sensor: as5048a@0 {
         compatible = "vnd,spi-device";
         reg = <0>;
@@ -40,7 +28,7 @@
     };
 };
 
-&lpuart2 {
+&lpuart6 {
     status = "okay";
     current-speed = <115200>;
 };
@@ -62,3 +50,7 @@
     #address-cells = <1>;
     #size-cells = <0>;
 };
+
+/ { chosen { zephyr,console = &cdc_acm_uart0; }; };
+
+&zephyr_udc0 { cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; label = "CDC_ACM_0"; }; };
