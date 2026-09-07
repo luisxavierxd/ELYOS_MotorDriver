@@ -1,0 +1,57 @@
+/*
+ * Device Tree Overlay para Teensy 4.1 - Proyecto ELYOS Motor Driver
+ * 
+ * En Zephyr, no se usan macros C (como los de Pinout.h) para configurar el hardware.
+ * En su lugar, se activa y configura el hardware modificando el DeviceTree.
+ * 
+ * NOTA: Este es un esqueleto. Se requiere habilitar los nodos pinctrl correspondientes 
+ * en Zephyr para habilitar las salidas FlexPWM y entradas ADC1 en el microcontrolador i.MX RT1062.
+ */
+
+ / {
+	aliases {
+		// Led de estado de Teensy 4.1
+		led0 = &led0;
+        
+        // Fase A (PWM2_CH0A / PWM2_CH0B)
+        // pwm_phase_a = &flexpwm2_pwm0;
+        
+        // ADC 1 para sensado de corriente y acelerador
+        // adc_sensors = &adc1;
+	};
+
+    leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio9 3 GPIO_ACTIVE_HIGH>; /* Pin 13 en Teensy 4.1 */
+			label = "User LED";
+		};
+	};
+};
+
+// Habilitar SPI para el encoder magnético
+&lpspi1 {
+	status = "okay";
+};
+
+// Habilitar UART para la comunicación con el ESP Companion
+&lpuart2 {
+    status = "okay";
+    current-speed = <115200>;
+};
+
+// ============================================================================
+// TODO: Habilitar FlexPWM y configurar Pinctrl para las Fases A, B, C
+// ============================================================================
+// &flexpwm2_pwm0 {
+//     status = "okay";
+//     pinctrl-0 = <&pinmux_flexpwm2_pwm0>;
+//     pinctrl-names = "default";
+// };
+
+// ============================================================================
+// TODO: Habilitar ADC1 para sensores de corriente, acelerador y VBUS
+// ============================================================================
+// &adc1 {
+//     status = "okay";
+// };
