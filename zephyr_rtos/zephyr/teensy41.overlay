@@ -1,30 +1,47 @@
 /*
- * Device Tree Overlay para Teensy 4.1
+ * Device Tree Overlay para Teensy 4.1 - FOC Motor Driver
  */
+#include <zephyr/dt-bindings/pinctrl/nxp-imx-pinctrl.h>
 
 / {
     aliases {
-        // PWM aliases para FOC
-        pwm-phase-a = &flexpwm2_pwm0;
-        pwm-phase-b = &flexpwm2_pwm2;
-        pwm-phase-c = &flexpwm2_pwm3;
+        led0 = &board_led;
         
         // Dispositivos FOC
         adc-motor = &adc1;
         uart-telem = &lpuart6;
         spi-mag = &lpspi3;
     };
+    chosen { zephyr,console = &cdc_acm_uart0; };
+};
+
+&pinctrl {
+    pinmux_flexpwm2: pinmux_flexpwm2 {
+        group0 {
+            pinmux = <&iomuxc_gpio_emc_06_flexpwm2_pwma0>, /* Pin 4 (High A) */
+                     <&iomuxc_gpio_emc_07_flexpwm2_pwmb0>, /* Pin 33 (Low A) */
+                     <&iomuxc_gpio_b0_10_flexpwm2_pwma2>, /* Pin 6 (High B) */
+                     <&iomuxc_gpio_b0_11_flexpwm2_pwmb2>, /* Pin 9 (Low B) */
+                     <&iomuxc_gpio_sd_b1_02_flexpwm2_pwma3>,  /* Pin 36 (High C) */
+                     <&iomuxc_gpio_sd_b1_03_flexpwm2_pwmb3>;  /* Pin 37 (Low C) */
+            drive-strength = "r0-4";
+            slew-rate = "fast";
+        };
+    };
+};
+
+&flexpwm2_pwm0 {
+    status = "okay";
+    pinctrl-0 = <&pinmux_flexpwm2>;
+    pinctrl-names = "default";
 };
 
 &lpspi3 {
     status = "okay";
-    
-    // Sensor magnético SPI
     mag_sensor: as5048a@0 {
         compatible = "vnd,spi-device";
         reg = <0>;
         spi-max-frequency = <10000000>;
-        label = "MAG_SENSOR";
     };
 };
 
@@ -33,24 +50,10 @@
     current-speed = <115200>;
 };
 
-&flexpwm2_pwm0 {
-    status = "okay";
-};
-
-&flexpwm2_pwm2 {
-    status = "okay";
-};
-
-&flexpwm2_pwm3 {
-    status = "okay";
-};
-
 &adc1 {
     status = "okay";
     #address-cells = <1>;
     #size-cells = <0>;
 };
 
-/ { chosen { zephyr,console = &cdc_acm_uart0; }; };
-
-&zephyr_udc0 { cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; label = "CDC_ACM_0"; }; };
+&zephyr_udc0 { cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; }; };

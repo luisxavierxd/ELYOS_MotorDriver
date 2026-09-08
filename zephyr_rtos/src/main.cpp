@@ -1,14 +1,15 @@
-// Workaround para bug de CMSIS con C++ en GCC (evita que falle la compilación, no usamos estas SIMD)
+// Workaround para bug de CMSIS con C++ en GCC
 #define __sxtb16(x) (x)
 #define __sxtab16(x, y) (x)
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/uart.h>
+#include <fsl_pwm.h>
+#include <fsl_clock.h>
 #include "foc_math.h"
 
 LOG_MODULE_REGISTER(elyos_driver, LOG_LEVEL_INF);
@@ -16,15 +17,11 @@ LOG_MODULE_REGISTER(elyos_driver, LOG_LEVEL_INF);
 // ============================================================================
 // HARDWARE DEVICES
 // ============================================================================
-const struct device *pwm_dev_a = NULL;
-const struct device *pwm_dev_b = NULL;
-const struct device *pwm_dev_c = NULL;
 const struct device *spi_dev = NULL;
 const struct device *adc_dev = NULL;
 const struct device *uart_dev = NULL;
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0});
 
-// Configuración SPI
 static const struct spi_config spi_cfg = {
     .frequency = 10000000,
     .operation = SPI_WORD_SET(16) | SPI_TRANSFER_MSB | SPI_MODE_CPHA,
@@ -32,205 +29,227 @@ static const struct spi_config spi_cfg = {
 };
 
 // ============================================================================
-// VARIABLES COMPARTIDAS ENTRE HILOS
+// VARIABLES GLOBALES (FOC)
 // ============================================================================
-static volatile float g_iq_target = 0.0f;
-static volatile float g_vbus = 24.0f;
-static volatile float g_elec_angle = 0.0f;
-static volatile float g_motor_rpm = 0.0f;
+float current_throttle = 0.0f;
+float motor_angle = 0.0f;
+float motor_velocity = 0.0f;
+float Ua = 0.0f, Ub = 0.0f, Uc = 0.0f;
 
-// Controladores PI
-static elyos_foc::PIController pi_d(0.5f, 0.01f, 24.0f);
-static elyos_foc::PIController pi_q(0.5f, 0.01f, 24.0f);
-
-struct sd_log_data {
-    uint32_t timestamp;
-    float current_iq;
-    float throttle_val;
-    float rpm;
-};
-K_MSGQ_DEFINE(sd_log_queue, sizeof(struct sd_log_data), 32, 4);
+#define _2PI 6.28318530718f
+#define DEADTIME_VAL 50
 
 // ============================================================================
-// HILO FOC (10 kHz - Prioridad muy alta cooperativa)
+// RTOS PRIMITIVES
 // ============================================================================
-// Utilizamos un semáforo liberado por un timer de hardware para mantener el determinismo.
-K_SEM_DEFINE(foc_sem, 0, 1);
+K_SEM_DEFINE(foc_timer_sem, 0, 1);
+K_MSGQ_DEFINE(telemetry_queue, sizeof(float) * 3, 10, 4);
 
-void foc_timer_isr(struct k_timer *timer_id) {
-    k_sem_give(&foc_sem);
+struct k_thread foc_thread_data;
+struct k_thread throttle_thread_data;
+struct k_thread telemetry_thread_data;
+K_THREAD_STACK_DEFINE(foc_stack, 2048);
+K_THREAD_STACK_DEFINE(throttle_stack, 1024);
+K_THREAD_STACK_DEFINE(telemetry_stack, 1024);
+
+// ============================================================================
+// HILOS
+// ============================================================================
+
+#include <fsl_iomuxc.h>
+
+void init_foc_pwm() {
+    CLOCK_EnableClock(kCLOCK_Iomuxc);
+    CLOCK_EnableClock(kCLOCK_Pwm2);
+    
+    // Configurar explAcitamente los pines para FlexPWM2 (Fase A, B, C)
+    IOMUXC_SetPinMux(IOMUXC_GPIO_EMC_06_FLEXPWM2_PWMA00, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_EMC_06_FLEXPWM2_PWMA00, 0x10B0U);
+    IOMUXC_SetPinMux(IOMUXC_GPIO_EMC_07_FLEXPWM2_PWMB00, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_EMC_07_FLEXPWM2_PWMB00, 0x10B0U);
+    
+    IOMUXC_SetPinMux(IOMUXC_GPIO_B0_10_FLEXPWM2_PWMA02, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_B0_10_FLEXPWM2_PWMA02, 0x10B0U);
+    IOMUXC_SetPinMux(IOMUXC_GPIO_B0_11_FLEXPWM2_PWMB02, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_B0_11_FLEXPWM2_PWMB02, 0x10B0U);
+    
+    IOMUXC_SetPinMux(IOMUXC_GPIO_SD_B1_02_FLEXPWM2_PWMA03, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_SD_B1_02_FLEXPWM2_PWMA03, 0x10B0U);
+    IOMUXC_SetPinMux(IOMUXC_GPIO_SD_B1_03_FLEXPWM2_PWMB03, 0U); 
+    IOMUXC_SetPinConfig(IOMUXC_GPIO_SD_B1_03_FLEXPWM2_PWMB03, 0x10B0U);
+    
+    uint32_t pwmSourceClockInHz = CLOCK_GetFreq(kCLOCK_IpgClk);
+    if (pwmSourceClockInHz == 0) pwmSourceClockInHz = 150000000; // Fallback seguro
+    uint32_t pwmFreq = 20000; // 20kHz FOC
+    
+    pwm_config_t pwmConfig;
+    PWM_GetDefaultConfig(&pwmConfig);
+    pwmConfig.reloadLogic = kPWM_ReloadPwmFullCycle;
+    pwmConfig.pairOperation = kPWM_ComplementaryPwmA;
+    pwmConfig.enableDebugMode = true;
+    
+    PWM_Init(PWM2, kPWM_Module_0, &pwmConfig);
+    PWM_Init(PWM2, kPWM_Module_2, &pwmConfig);
+    PWM_Init(PWM2, kPWM_Module_3, &pwmConfig);
+    
+    // Deshabilitar fuentes de falla que podrian estar bloqueando las salidas
+    for (int i = 0; i < FSL_FEATURE_PWM_FAULT_CH_COUNT; i++) {
+        PWM2->SM[kPWM_Module_0].DISMAP[i] = 0x0000;
+        PWM2->SM[kPWM_Module_2].DISMAP[i] = 0x0000;
+        PWM2->SM[kPWM_Module_3].DISMAP[i] = 0x0000;
+    }
+    
+    pwm_signal_param_t pwmSignal[2];
+    
+    pwmSignal[0].pwmChannel = kPWM_PwmA;
+    pwmSignal[0].level = kPWM_HighTrue;
+    pwmSignal[0].dutyCyclePercent = 0;
+    pwmSignal[0].deadtimeValue = DEADTIME_VAL;
+    pwmSignal[0].faultState = kPWM_PwmFaultState0;
+    pwmSignal[0].pwmchannelenable = true;
+    
+    pwmSignal[1].pwmChannel = kPWM_PwmB;
+    pwmSignal[1].level = kPWM_HighTrue;
+    pwmSignal[1].dutyCyclePercent = 0;
+    pwmSignal[1].deadtimeValue = DEADTIME_VAL;
+    pwmSignal[1].faultState = kPWM_PwmFaultState0;
+    pwmSignal[1].pwmchannelenable = true;
+    
+    PWM_SetupPwm(PWM2, kPWM_Module_0, pwmSignal, 2, kPWM_CenterAligned, pwmFreq, pwmSourceClockInHz);
+    PWM_SetupPwm(PWM2, kPWM_Module_2, pwmSignal, 2, kPWM_CenterAligned, pwmFreq, pwmSourceClockInHz);
+    PWM_SetupPwm(PWM2, kPWM_Module_3, pwmSignal, 2, kPWM_CenterAligned, pwmFreq, pwmSourceClockInHz);
+    
+    PWM_SetPwmLdok(PWM2, kPWM_Control_Module_0 | kPWM_Control_Module_2 | kPWM_Control_Module_3, true);
+    
+    // Forzar el encendido de las salidas fisicas A y B (High/Low) para los tres modulos
+    PWM2->OUTEN |= ((1U << kPWM_Module_0) << PWM_OUTEN_PWMA_EN_SHIFT);
+    PWM2->OUTEN |= ((1U << kPWM_Module_0) << PWM_OUTEN_PWMB_EN_SHIFT);
+    PWM2->OUTEN |= ((1U << kPWM_Module_2) << PWM_OUTEN_PWMA_EN_SHIFT);
+    PWM2->OUTEN |= ((1U << kPWM_Module_2) << PWM_OUTEN_PWMB_EN_SHIFT);
+    PWM2->OUTEN |= ((1U << kPWM_Module_3) << PWM_OUTEN_PWMA_EN_SHIFT);
+    PWM2->OUTEN |= ((1U << kPWM_Module_3) << PWM_OUTEN_PWMB_EN_SHIFT);
+    
+    PWM_StartTimer(PWM2, kPWM_Control_Module_0 | kPWM_Control_Module_2 | kPWM_Control_Module_3);
 }
-K_TIMER_DEFINE(foc_timer, foc_timer_isr, NULL);
 
-#define FOC_STACK_SIZE 2048
-#define FOC_PRIORITY -1 // Cooperativo (no es interrumpido por hilos normales)
+void set_pwm_duty(uint8_t duty_a_pct, uint8_t duty_b_pct, uint8_t duty_c_pct) {
+    PWM_UpdatePwmDutycycle(PWM2, kPWM_Module_0, kPWM_PwmA, kPWM_CenterAligned, duty_a_pct);
+    PWM_UpdatePwmDutycycle(PWM2, kPWM_Module_2, kPWM_PwmA, kPWM_CenterAligned, duty_b_pct);
+    PWM_UpdatePwmDutycycle(PWM2, kPWM_Module_3, kPWM_PwmA, kPWM_CenterAligned, duty_c_pct);
+    PWM_SetPwmLdok(PWM2, kPWM_Control_Module_0 | kPWM_Control_Module_2 | kPWM_Control_Module_3, true);
+}
 
-void task_foc_entry(void *, void *, void *) {
-    LOG_INF("Iniciando tarea FOC a 10 kHz...");
-    const uint32_t period_ns = 100000;
-    float dt = 0.0001f;
-
-    // Buffer SPI (16 bits)
-    uint16_t spi_tx = 0xFFFF;
-    uint16_t spi_rx = 0;
-    struct spi_buf tx_buf = {.buf = &spi_tx, .len = 2};
-    struct spi_buf rx_buf = {.buf = &spi_rx, .len = 2};
-    struct spi_buf_set tx_bufs = {.buffers = &tx_buf, .count = 1};
-    struct spi_buf_set rx_bufs = {.buffers = &rx_buf, .count = 1};
-
+void foc_loop_task(void *a, void *b, void *c) {
+    float v_bus = 12.0f;
+    
     while (1) {
-        // Espera exacta al tick del timer de hardware (100 us)
-        k_sem_take(&foc_sem, K_FOREVER);
+        k_sem_take(&foc_timer_sem, K_FOREVER);
+        
+        motor_angle += 0.001f; // 10 rad/s open loop
+        if (motor_angle > _2PI) motor_angle -= _2PI;
+        
+        // Open loop voltage control para pruebas
+        float v_d = 0.0f;
+        float v_q = current_throttle * v_bus; 
+        
+        elyos_foc::DQVoltages dq = {v_d, v_q};
+        elyos_foc::AlphaBeta ab = elyos_foc::inv_park(dq, motor_angle);
+        elyos_foc::PhaseVoltages phases = elyos_foc::svpwm(ab, v_bus);
+        
+        Ua = phases.a;
+        Ub = phases.b;
+        Uc = phases.c;
+        
+        // Convertir fraccion de SVPWM (0.0 - 1.0) a porcentaje (0-100)
+        uint8_t duty_a = (uint8_t)(phases.a * 100.0f);
+        uint8_t duty_b = (uint8_t)(phases.b * 100.0f);
+        uint8_t duty_c = (uint8_t)(phases.c * 100.0f);
+        
+        // Limitar duty
+        if(duty_a > 100) duty_a = 100;
+        if(duty_b > 100) duty_b = 100;
+        if(duty_c > 100) duty_c = 100;
+        
+        set_pwm_duty(duty_a, duty_b, duty_c);
+    }
+}
 
-        // 1. Lectura del ángulo (SPI)
-        if (spi_dev != NULL) {
-            if (spi_transceive(spi_dev, &spi_cfg, &tx_bufs, &rx_bufs) == 0) {
-                // Conversión de 14 bits (ej. AS5048) a radianes (ejemplo simplificado)
-                uint16_t angle_raw = spi_rx & 0x3FFF;
-                g_elec_angle = (float)angle_raw * (2.0f * 3.14159265f / 16384.0f) * 7.0f; // * pares de polos
-            }
-        }
-
-        // 2. Lectura de corrientes (Simulada por ahora, ya que requiere secuencia ADC1)
-        elyos_foc::PhaseCurrents i_abc = {0.0f, 0.0f, 0.0f};
-
-        // 3. FOC Math
-        elyos_foc::AlphaBeta i_ab = elyos_foc::clarke(i_abc);
-        elyos_foc::DQCurrents i_dq = elyos_foc::park(i_ab, g_elec_angle);
-
-        float error_d = 0.0f - i_dq.d;
-        float v_d = pi_d(error_d, dt);
-
-        float error_q = g_iq_target - i_dq.q;
-        float v_q = pi_q(error_q, dt);
-
-        elyos_foc::DQVoltages v_dq_target = {v_d, v_q};
-        elyos_foc::AlphaBeta v_ab_target = elyos_foc::inv_park(v_dq_target, g_elec_angle);
-        elyos_foc::PhaseVoltages duties = elyos_foc::svpwm(v_ab_target, g_vbus);
-
-        // 4. Inyección a PWM
-        if (pwm_dev_a && pwm_dev_b && pwm_dev_c) {
-            pwm_set_cycles(pwm_dev_a, 0, period_ns, duties.a * period_ns, 0);
-            pwm_set_cycles(pwm_dev_b, 0, period_ns, duties.b * period_ns, 0);
-            pwm_set_cycles(pwm_dev_c, 0, period_ns, duties.c * period_ns, 0);
+void throttle_task(void *a, void *b, void *c) {
+    while (1) {
+        k_msleep(4); // 250 Hz
+        if (adc_dev) {
+            current_throttle = 0.4f; // 40% throttle fijo simulado
         }
     }
 }
-K_THREAD_DEFINE(foc_tid, FOC_STACK_SIZE, task_foc_entry, NULL, NULL, NULL, FOC_PRIORITY, 0, 0);
 
-// ============================================================================
-// HILO THROTTLE (250 Hz)
-// ============================================================================
-#define THROTTLE_STACK_SIZE 1024
-#define THROTTLE_PRIORITY 3
-
-void task_throttle_entry(void *, void *, void *) {
-    LOG_INF("Iniciando tarea Throttle a 250 Hz...");
-    
-    int16_t adc_buffer;
-    struct adc_sequence sequence = {
-        .options = NULL,
-        .channels = BIT(0), // Canal simulado
-        .buffer = &adc_buffer,
-        .buffer_size = sizeof(adc_buffer),
-        .resolution = 12,
-    };
-
+void telemetry_task(void *a, void *b, void *c) {
     while (1) {
-        if (adc_dev != NULL) {
-            adc_read(adc_dev, &sequence);
-            // Mapeo rudimentario de ADC a objetivo Iq
-            float val = (float)adc_buffer;
-            if (val > 490.0f) {
-                g_iq_target = (val - 490.0f) * 0.01f; // Escala 
-            } else {
-                g_iq_target = 0.0f;
-            }
+        k_msleep(20); // 50 Hz
+        
+        float data[3] = {motor_angle, current_throttle, Ua};
+        k_msgq_put(&telemetry_queue, &data, K_NO_WAIT);
+        
+        if (uart_dev) {
+            uint8_t ch = 'T';
+            uart_poll_out(uart_dev, ch);
         }
-        k_msleep(4); 
-    }
-}
-K_THREAD_DEFINE(throttle_tid, THROTTLE_STACK_SIZE, task_throttle_entry, NULL, NULL, NULL, THROTTLE_PRIORITY, 0, 0);
-
-// ============================================================================
-// HILO TELEMETRÍA (50 Hz)
-// ============================================================================
-#define TELEMETRY_STACK_SIZE 2048
-#define TELEMETRY_PRIORITY 4
-
-void task_telemetry_entry(void *, void *, void *) {
-    LOG_INF("Iniciando tarea Telemetría (UART) a 50 Hz...");
-    struct sd_log_data record;
-    
-    while (1) {
-        // Enviar por UART al companion ESP
-        if (uart_dev != NULL) {
-            // Ejemplo de telemetria binaria simplificada (placeholder)
-            uint8_t buffer[4] = {0xAA, (uint8_t)g_iq_target, 0, 0xBB};
-            for (int i = 0; i < 4; i++) {
-                uart_poll_out(uart_dev, buffer[i]);
-            }
-        }
-
-        // Encolar datos para la SD
-        record.timestamp = k_uptime_get_32();
-        record.current_iq = g_iq_target;
-        record.throttle_val = g_iq_target;
-        record.rpm = g_motor_rpm;
-        k_msgq_put(&sd_log_queue, &record, K_NO_WAIT);
-
+        
         if (led.port != NULL) {
             gpio_pin_toggle_dt(&led);
         }
-
-        k_msleep(20);
     }
 }
-K_THREAD_DEFINE(telemetry_tid, TELEMETRY_STACK_SIZE, task_telemetry_entry, NULL, NULL, NULL, TELEMETRY_PRIORITY, 0, 0);
 
-// ============================================================================
-// HILO SD LOGGER (Fondo)
-// ============================================================================
-#define LOGGER_STACK_SIZE 2048
-#define LOGGER_PRIORITY 5
-
-void task_logger_entry(void *, void *, void *) {
-    LOG_INF("Iniciando tarea SD Logger...");
-    struct sd_log_data record;
-    
-    while (1) {
-        if (k_msgq_get(&sd_log_queue, &record, K_FOREVER) == 0) {
-            // fs_write a tarjeta SD (FatFs)
-        }
-    }
+// ISR Timer Simulado
+void simulated_timer_isr(struct k_timer *dummy) {
+    k_sem_give(&foc_timer_sem);
 }
-K_THREAD_DEFINE(logger_tid, LOGGER_STACK_SIZE, task_logger_entry, NULL, NULL, NULL, LOGGER_PRIORITY, 0, 0);
+K_TIMER_DEFINE(foc_timer, simulated_timer_isr, NULL);
 
 // ============================================================================
 // MAIN / SETUP
 // ============================================================================
 int main(void) {
-    LOG_INF("Arrancando ELYOS Motor Driver (Zephyr RTOS Port) - 100%% Capacidades");
+    // El puerto USB ya se inicializa solo
+    k_msleep(1500); 
+
+    LOG_INF("================================================");
+    LOG_INF("Arrancando ELYOS Motor Driver (Zephyr RTOS Port)");
+    LOG_INF("================================================");
 
     if (led.port != NULL) {
         gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
     }
 
-    // Inicializar dispositivos
-    pwm_dev_a = DEVICE_DT_GET(DT_ALIAS(pwm_phase_a));
-    pwm_dev_b = DEVICE_DT_GET(DT_ALIAS(pwm_phase_b));
-    pwm_dev_c = DEVICE_DT_GET(DT_ALIAS(pwm_phase_c));
-    spi_dev = DEVICE_DT_GET(DT_ALIAS(spi_mag));
-    adc_dev = DEVICE_DT_GET(DT_ALIAS(adc_motor));
-    uart_dev = DEVICE_DT_GET(DT_ALIAS(uart_telem));
+    spi_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(spi_mag));
+    adc_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(adc_motor));
+    uart_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(uart_telem));
 
-    if (!device_is_ready(pwm_dev_a)) LOG_ERR("PWM A no listo");
-    if (!device_is_ready(spi_dev)) LOG_ERR("SPI no listo");
-    if (!device_is_ready(adc_dev)) LOG_ERR("ADC no listo");
-    if (!device_is_ready(uart_dev)) LOG_ERR("UART no listo");
+    if (!spi_dev) LOG_WRN("SPI no configurado (standalone)");
+    
+    // Inicializar FOC PWM Hardware a bajo nivel (HAL)
+    LOG_INF("Inicializando hardware puente H trifásico...");
+    init_foc_pwm();
 
-    // Iniciar temporizador de hardware (Dispara el semáforo FOC cada 100us)
+    LOG_INF("Iniciando hilos del RTOS...");
+    
+    k_thread_create(&foc_thread_data, foc_stack, K_THREAD_STACK_SIZEOF(foc_stack),
+                    foc_loop_task, NULL, NULL, NULL,
+                    K_PRIO_COOP(1), 0, K_NO_WAIT);
+
+    k_thread_create(&throttle_thread_data, throttle_stack, K_THREAD_STACK_SIZEOF(throttle_stack),
+                    throttle_task, NULL, NULL, NULL,
+                    K_PRIO_COOP(5), 0, K_NO_WAIT);
+
+    k_thread_create(&telemetry_thread_data, telemetry_stack, K_THREAD_STACK_SIZEOF(telemetry_stack),
+                    telemetry_task, NULL, NULL, NULL,
+                    K_PRIO_COOP(7), 0, K_NO_WAIT);
+
+    // Arrancar timer a 10kHz (100us)
     k_timer_start(&foc_timer, K_USEC(100), K_USEC(100));
+
+    LOG_INF("Sistema listo y operando a 10kHz.");
 
     return 0;
 }

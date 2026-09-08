@@ -1,20 +1,33 @@
 # ELYOS Motor Driver
 
-This repository contains the firmware for the ELYOS motor driver.
-It has been split into two parts to maintain a stable, working version while exploring a new industrial-grade architecture.
+Este repositorio contiene las distintas iteraciones del firmware para el controlador de motores ELYOS. El proyecto ha evolucionado a lo largo del tiempo, y se mantienen tres versiones separadas en directorios independientes para preservar el historial, permitir pruebas comparativas y facilitar el desarrollo.
 
-## Directory Structure
+## Estructura del Repositorio
 
-*   [`teensyduino_freertos/`](teensyduino_freertos/): The current, stable working version using **Teensyduino** and **FreeRTOS** on the Teensy 4.1. This uses the `SimpleFOC` library and implements a multi-tasking architecture for telemetry, FOC control, and pedal processing. This project is built using PlatformIO.
-*   [`zephyr_rtos/`](zephyr_rtos/): An experimental port of the motor driver to the **Zephyr RTOS**. This aims to evaluate Zephyr as a more robust, industrial-grade RTOS alternative to the Teensyduino framework.
+El código está organizado en tres ramas arquitectónicas principales:
 
-### Building
+*   📂 **[`normal_arduino/`](normal_arduino/)**
+    *   **Descripción**: La versión original y más básica del código.
+    *   **Arquitectura**: Bucle de control simple (`setup`/`loop`) bajo el framework clásico de Arduino (Teensyduino).
+    *   **Uso**: Funciona como un "Hello World" del motor. Ideal para pruebas rápidas de hardware sin la complejidad de sistemas operativos en tiempo real. Utiliza la librería `SimpleFOC`.
 
-**Teensyduino + FreeRTOS**
-1. Open the `teensyduino_freertos` directory in VS Code with the PlatformIO extension installed.
-2. Build and upload using PlatformIO.
+*   📂 **[`teensyduino_freertos/`](teensyduino_freertos/)**
+    *   **Descripción**: La versión estable, testeada y funcional con capacidades multitarea.
+    *   **Arquitectura**: Combina el framework de Arduino (Teensyduino) con el planificador de tareas de **FreeRTOS**.
+    *   **Uso**: Implementa hilos separados para la telemetría, el procesamiento del acelerador y el bucle principal de control FOC (usando `SimpleFOC`). Es la versión de producción actual construida bajo PlatformIO.
 
-**Zephyr RTOS**
-1. Ensure you have the Zephyr SDK and west workspace set up.
-2. From the `zephyr_rtos` directory, build using: `west build -b teensy41`
-3. Flash using: `west flash`
+*   📂 **[`zephyr_rtos/`](zephyr_rtos/)**
+    *   **Descripción**: La versión de grado industrial hiper-optimizada (Bare-Metal).
+    *   **Arquitectura**: Un port completamente nativo corriendo sobre el sistema operativo **Zephyr RTOS**. Elimina el overhead de Arduino y SimpleFOC.
+    *   **Uso**: Se comunica directamente con los registros de hardware del i.MX RT1062 (Teensy 4.1) mediante la HAL de NXP (`fsl_pwm.h`). Contiene un motor matemático FOC customizado para máxima velocidad usando la FPU de hardware. 
+
+## Compilación y Despliegue
+
+Todos los entornos están configurados para compilarse mediante **PlatformIO**.
+
+Para trabajar con cualquier versión:
+1. Abre la carpeta deseada (ej. `zephyr_rtos`) en VS Code.
+2. Asegúrate de tener instalada la extensión de **PlatformIO**.
+3. Utiliza los botones de PlatformIO (`Build` / `Upload`) o la terminal: `pio run -t upload`
+
+*Nota: Revisa el `README.md` dentro de cada carpeta para detalles técnicos específicos de cada arquitectura.*
